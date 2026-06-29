@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Camera and microphone — required before joining a call.
+         Requested at runtime in MainActivity when the user taps "Join Room". -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- INTERNET is declared in the samvyo-sdk library manifest.
+         Android's manifest merger pulls it into this APK automatically. -->
+
+    <application
+        android:name=".SamvyoApp"
+        android:allowBackup="true"
+        android:label="Samvyo Demo"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
