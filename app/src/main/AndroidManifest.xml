@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Camera and microphone — required before joining a call.
-         Requested at runtime in MainActivity when the user taps "Join Room". -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- INTERNET is declared in the samvyo-sdk library manifest.
-         Android's manifest merger pulls it into this APK automatically. -->
+    <!-- Required for ScreenCaptureService (foreground service for screen sharing) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Required on Android 13+ (API 33) to show the "Screen sharing active" notification -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- INTERNET is declared in the samvyo-sdk library manifest and merged in automatically -->
 
     <application
         android:name=".SamvyoApp"
@@ -15,14 +18,25 @@
         android:label="Samvyo Demo"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- SDK's foreground service for screen capture on Android 10+.
+             Must be declared here (in the host app manifest) — SDK manifest alone is not enough.
+             android:foregroundServiceType="mediaProjection" is required by Android 10+ (API 29+). -->
+        <service
+            android:name="io.samvyo.sdk.screen.ScreenCaptureService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
+
     </application>
 
 </manifest>
