@@ -10,6 +10,20 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // com.samvyo:mediasoup-client is published here (private repo), not Maven
+        // Central. Needs a GitHub PAT with read:packages scope, set as GPR_USER/
+        // GPR_TOKEN in ~/.gradle/gradle.properties (never committed) or as
+        // GITHUB_ACTOR/GITHUB_TOKEN env vars.
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/Samvyo/mediasoup-android-client-latest")
+            credentials {
+                username = providers.gradleProperty("GPR_USER").orNull
+                    ?: System.getenv("GITHUB_ACTOR")
+                password = providers.gradleProperty("GPR_TOKEN").orNull
+                    ?: System.getenv("GITHUB_TOKEN")
+            }
+        }
     }
 }
 

@@ -9,7 +9,7 @@ composeBom = "2024.12.01"
 retrofit = "2.11.0"
 okhttp = "4.12.0"
 coroutines = "1.9.0"
-mediasoup = "3.4.0"
+mediasoup = "1.0.2"
 junit = "4.13.2"
 
 [libraries]
@@ -28,7 +28,7 @@ retrofit-gson = { group = "com.squareup.retrofit2", name = "converter-gson", ver
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
-mediasoup-client = { group = "io.github.haiyangwu", name = "mediasoup-client", version.ref = "mediasoup" }
+mediasoup-client = { group = "com.samvyo", name = "mediasoup-client", version.ref = "mediasoup" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 
 [plugins]
