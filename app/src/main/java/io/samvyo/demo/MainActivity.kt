@@ -61,12 +61,14 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun RoomScreen(vm: RoomViewModel = viewModel()) {
     val state by vm.ui.collectAsState()
+    val notification by vm.notification.collectAsState()
 
     // ── Join screen ────────────────────────────────────────────────────────────
     // Matches the RN reference app's structure: join controls and call controls live
-    // in the same continuously scrolling screen (not a screen switch) — the fields
-    // below simply become non-editable/hidden as appropriate once state is InCall,
-    // and CallSections(vm) is appended at the bottom of this same Column.
+    // in the same continuously scrolling screen, always mounted together (not a screen
+    // switch, and not gated behind having joined) — the join fields above become
+    // non-editable once state leaves Idle/Error, and CallSections(vm) below is always
+    // rendered, exactly like RN's single unconditional ScrollView.
 
     var roomId    by rememberSaveable { mutableStateOf("") }
     var peerName  by rememberSaveable { mutableStateOf("peer-1") }
@@ -81,6 +83,11 @@ fun RoomScreen(vm: RoomViewModel = viewModel()) {
 
     val log   by vm.log.collectAsState()
     val editable = state is RoomUiState.Idle || state is RoomUiState.Error
+    // Mirrors the RN reference app's `sdkInstanceRef.current` truthiness check — true from
+    // the moment initRoom() creates a room/SDK instance (Connecting) through InCall, false
+    // before that and after an error/leave. Gates CallSections' media-control buttons only;
+    // Engagement/Chat/Stage/Permissions/etc. are never gated by this, matching RN exactly.
+    val roomExists = state !is RoomUiState.Idle && state !is RoomUiState.Error
 
     // Camera list is queryable before a room exists (Camera2Enumerator is a static
     // Android API, not SDK/room state) — matches the RN app's pre-join "Select Devices"
@@ -127,6 +134,26 @@ fun RoomScreen(vm: RoomViewModel = viewModel()) {
     ) {
         Text("Samvyo Demo", style = MaterialTheme.typography.headlineMedium)
 
+        // ── Notification banner ───────────────────────────────────────────────
+        // vm.notification carries one-shot events (mic force-muted, upgrade declined,
+        // consumer preempted, non-fatal reconnect errors, etc.) that aren't tied to any
+        // single section below, so it's rendered once here at the top regardless of state.
+        if (notification != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text     = notification!!,
+                    color    = MaterialTheme.colorScheme.error,
+                    style    = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { vm.dismissNotification() }) { Text("Dismiss") }
+            }
+        }
+
         // Room ID + peer name inputs
         OutlinedTextField(
             value         = roomId,
@@ -154,6 +181,7 @@ fun RoomScreen(vm: RoomViewModel = viewModel()) {
             listOf(
                 RoomConstants.ROOM_CONFERENCING to "Conferencing",
                 RoomConstants.ROOM_EVENT        to "Event",
+                RoomConstants.ROOM_P2P          to "P2P",
             ).forEach { (value, label) ->
                 FilterChip(
                     selected = roomType == value,
@@ -314,10 +342,13 @@ fun RoomScreen(vm: RoomViewModel = viewModel()) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        // ── Call sections — appended below the join controls once InCall, same screen. ──
-        if (state is RoomUiState.InCall) {
-            CallSections(vm)
-        }
+        // ── Call sections — always mounted below the join controls on this same screen,
+        // matching the RN reference app's single always-rendered ScrollView (Engagement,
+        // Chat, Stage Routing, Permissions, and Transcription/Live-Streaming are visible
+        // even before Init Room is tapped; only the media-control buttons are gated on
+        // roomExists, and peerType drives moderator-only sections from the join-screen
+        // selection rather than waiting for a confirmed joined role). ──
+        CallSections(vm, peerType = peerType, roomExists = roomExists)
 
         // WebSocket debug log
         HorizontalDivider()

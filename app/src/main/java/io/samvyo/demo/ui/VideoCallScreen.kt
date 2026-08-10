@@ -41,15 +41,26 @@ import io.samvyo.sdk.RoomConstants
 private val ReactionEmojis = listOf("👍", "❤️", "🎉", "👏", "🔥", "😂", "😮", "🙌", "✨")
 
 /**
- * Everything that appears once a call is joined, laid out as one continuous set of
- * sections — mirrors the RN reference app's structure (App.js renders join controls
- * and call controls in a single ScrollView, not as separate screens). MainActivity's
- * RoomScreen embeds this directly inside its own scrollable Column when state is InCall,
- * rather than switching to a full-screen replacement.
+ * Everything below the join fields, laid out as one continuous set of sections —
+ * mirrors the RN reference app's structure exactly: App.js renders join controls and
+ * call controls in a single, always-mounted ScrollView, not gated behind having joined.
+ * MainActivity's RoomScreen embeds this unconditionally inside its own scrollable Column.
+ *
+ * [peerType] is the *selected* role from the join screen's "Join As" chips — not
+ * necessarily a confirmed joined role. This matches RN, which has no separate
+ * "confirmed" role concept: `resolvedPeerType`/`isModeratorRole` are derived straight
+ * from the same pre-join selector state throughout the RN app's whole lifecycle, so
+ * e.g. Presenter/Participant/General Permissions panels are already visible the moment
+ * "Moderator" is selected, before Init Room is even tapped.
+ *
+ * [roomExists] mirrors RN's `sdkInstanceRef.current` truthiness — gates only the
+ * media-control buttons (mute/camera/screen-share/record); every other section here
+ * (Engagement, Chat, Stage Routing, permission panels, Transcription/Live Streaming)
+ * is unconditional in RN and stays unconditional here too.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun CallSections(vm: RoomViewModel) {
+fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
 
     val eglContext       by vm.eglContext.collectAsState()
     val localTrack       by vm.localVideoTrack.collectAsState()
@@ -67,9 +78,13 @@ fun CallSections(vm: RoomViewModel) {
     val transcriptionEntries by vm.transcriptionEntries.collectAsState()
     val handRaised       by vm.handRaised.collectAsState()
     val chatMessages     by vm.chatMessages.collectAsState()
-    val localPeerType    by vm.localPeerType.collectAsState()
-    val isModerator      = localPeerType == RoomConstants.PEER_MODERATOR
+    // Selected role (join screen), not the confirmed-joined role — see the doc comment above.
+    val isModerator      = peerType == RoomConstants.PEER_MODERATOR
     val isRoomLocked      by vm.isRoomLocked.collectAsState()
+    val isReconnecting    by vm.isReconnecting.collectAsState()
+    val viewerCount       by vm.viewerCount.collectAsState()
+    val isMigratingToSfu  by vm.isMigratingToSfu.collectAsState()
+    val peerConnectionFailed by vm.peerConnectionFailed.collectAsState()
     val handRaiseList     by vm.handRaiseList.collectAsState()
     val recentReactions   by vm.recentReactions.collectAsState()
     val selectedChatReceiver by vm.selectedChatReceiver.collectAsState()
@@ -138,38 +153,58 @@ fun CallSections(vm: RoomViewModel) {
                     text = participantName(participants, pid) +
                         (if (activeSpeakerId == pid) " 🔊" else "") +
                         (if (muteState?.isAudioMuted == true) " 🔇" else "") +
-                        (if (muteState?.isVideoMuted == true) " 📷" else ""),
+                        (if (muteState?.isVideoMuted == true) " 📷" else "") +
+                        // P2P only — direct connection to this peer hard-failed.
+                        (if (pid in peerConnectionFailed) " ⚠️" else ""),
                     style = MaterialTheme.typography.labelMedium,
                 )
                 VideoRenderer(track = track, eglContext = egl, modifier = Modifier.fillMaxWidth().height(200.dp))
-            }
-            if (remoteTracks.isEmpty() && screenTracks.isEmpty()) {
-                Text("Waiting for others to join…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
 
         if (isRoomLocked) {
             Text("🔒 Room is currently locked", color = MaterialTheme.colorScheme.error)
         }
+        // Only ever populated for EVENT-type rooms — see viewerCount's doc comment.
+        if (viewerCount != null) {
+            Text("👁 $viewerCount watching", style = MaterialTheme.typography.labelMedium)
+        }
+        if (isReconnecting) {
+            // ConnectionState.Failed fired mid-call — SignallingClient is retrying with its
+            // own exponential backoff (see RoomViewModel's connectionState.collect). This
+            // clears on ConnectionState.Reconnected, or the call ends via the terminal
+            // SOCKET_RECONNECT_FAILED error if all retries are exhausted.
+            Text("🔄 Reconnecting…", color = MaterialTheme.colorScheme.error)
+        }
+        if (isMigratingToSfu) {
+            // P2P room auto-upgrading to a group (SFU) call — server-driven once the
+            // room crosses its p2pThreshold peer count. Clears on RoomModeChanged.
+            Text("⬆️ Upgrading to group call…", color = MaterialTheme.colorScheme.error)
+        }
 
         // ── Media controls ────────────────────────────────────────────────────
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { vm.toggleMic() }) { Text(if (isMicMuted) "Unmute" else "Mute") }
-            OutlinedButton(onClick = { vm.toggleCamera() }) { Text(if (isCameraOff) "Camera On" else "Camera Off") }
-            OutlinedButton(onClick = { vm.flipCamera() }) { Text("Flip Camera") }
-            if (videoDevices.size > 2) {
-                OutlinedButton(onClick = { showVideoDevicePicker = true }) { Text("Select Camera") }
-            }
-            OutlinedButton(onClick = {
-                if (isScreenSharing) {
-                    vm.stopScreenShare()
-                } else {
-                    val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    screenShareLauncher.launch(mgr.createScreenCaptureIntent())
+        // Gated on roomExists — mirrors RN's `{sdkInstanceRef.current && (<View>...)}`.
+        // Unlike the sections below, RN does hide this whole block until a room/SDK
+        // instance exists, rather than leaving it visible-but-inert.
+        if (roomExists) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { vm.toggleMic() }) { Text(if (isMicMuted) "Unmute" else "Mute") }
+                OutlinedButton(onClick = { vm.toggleCamera() }) { Text(if (isCameraOff) "Camera On" else "Camera Off") }
+                OutlinedButton(onClick = { vm.flipCamera() }) { Text("Flip Camera") }
+                if (videoDevices.size > 2) {
+                    OutlinedButton(onClick = { showVideoDevicePicker = true }) { Text("Select Camera") }
                 }
-            }) { Text(if (isScreenSharing) "Stop Share" else "Share Screen") }
-            if (isModerator) {
-                OutlinedButton(onClick = { vm.toggleRecording() }) { Text(if (isRecording) "Stop REC" else "Start REC") }
+                OutlinedButton(onClick = {
+                    if (isScreenSharing) {
+                        vm.stopScreenShare()
+                    } else {
+                        val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                        screenShareLauncher.launch(mgr.createScreenCaptureIntent())
+                    }
+                }) { Text(if (isScreenSharing) "Stop Share" else "Share Screen") }
+                if (isModerator) {
+                    OutlinedButton(onClick = { vm.toggleRecording() }) { Text(if (isRecording) "Stop REC" else "Start REC") }
+                }
             }
         }
         if (isRecording) {
@@ -180,7 +215,7 @@ fun CallSections(vm: RoomViewModel) {
         Text("Engagement", style = MaterialTheme.typography.titleSmall)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { vm.toggleHand() }) { Text(if (handRaised) "Lower Hand" else "Raise Hand") }
-            if (localPeerType == RoomConstants.PEER_VIEWER) {
+            if (peerType == RoomConstants.PEER_VIEWER) {
                 OutlinedButton(onClick = { vm.requestUpgrade() }) { Text("Request Upgrade") }
             }
         }
@@ -387,36 +422,36 @@ fun CallSections(vm: RoomViewModel) {
             }
         }
 
-        // ── Screen Shares ──────────────────────────────────────────────────────
-        if (screenTracks.isEmpty()) {
-            SectionDivider("Screen Shares")
-            Text("No Screen Share", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-        }
-
         // ── Participants ───────────────────────────────────────────────────────
-        SectionDivider("Participants (${participants.size})")
-        participants.forEach { peer ->
-            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                val muteState = peerMuteStates[peer.peerId]
-                Text(
-                    text = (peer.name ?: peer.peerId.take(8)) +
-                        (if (peer.isLocal) " (you)" else "") +
-                        (if (muteState?.isAudioMuted == true) " 🔇" else "") +
-                        (if (muteState?.isVideoMuted == true) " 📷" else ""),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                if (!peer.isLocal && peer.participantType != null) {
-                    Text(peer.participantType!!, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                if (!peer.isLocal && isModerator) {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { vm.kickPeer(peer.peerId) }) { Text("Kick") }
-                        if (peer.participantType == RoomConstants.PEER_VIEWER) {
-                            TextButton(onClick = { vm.upgradePeer(peer.peerId) }) { Text("Upgrade") }
-                            TextButton(onClick = { vm.sendUpgradeInvite(peer.peerId) }) { Text("Request") }
-                        }
-                        if (peer.participantType == RoomConstants.PEER_PARTICIPANT) {
-                            TextButton(onClick = { vm.downgradePeer(peer.peerId) }) { Text("Downgrade") }
+        // Whole section hidden when empty — mirrors RN's `{peersArray.length > 0 && (...)}`.
+        // (Screen shares that exist are already rendered in the video area above; RN's
+        // own "Screen Shares" section is likewise just its content with no empty-state
+        // placeholder, so there's nothing to duplicate here when screenTracks is empty.)
+        if (participants.isNotEmpty()) {
+            SectionDivider("Participants (${participants.size})")
+            participants.forEach { peer ->
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    val muteState = peerMuteStates[peer.peerId]
+                    Text(
+                        text = (peer.name ?: peer.peerId.take(8)) +
+                            (if (peer.isLocal) " (you)" else "") +
+                            (if (muteState?.isAudioMuted == true) " 🔇" else "") +
+                            (if (muteState?.isVideoMuted == true) " 📷" else ""),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    if (!peer.isLocal && peer.participantType != null) {
+                        Text(peer.participantType!!, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (!peer.isLocal && isModerator) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(onClick = { vm.kickPeer(peer.peerId) }) { Text("Kick") }
+                            if (peer.participantType == RoomConstants.PEER_VIEWER) {
+                                TextButton(onClick = { vm.upgradePeer(peer.peerId) }) { Text("Upgrade") }
+                                TextButton(onClick = { vm.sendUpgradeInvite(peer.peerId) }) { Text("Request") }
+                            }
+                            if (peer.participantType == RoomConstants.PEER_PARTICIPANT) {
+                                TextButton(onClick = { vm.downgradePeer(peer.peerId) }) { Text("Downgrade") }
+                            }
                         }
                     }
                 }
@@ -424,10 +459,17 @@ fun CallSections(vm: RoomViewModel) {
         }
 
         HorizontalDivider()
-        OutlinedButton(onClick = { vm.leaveRoom() }, modifier = Modifier.fillMaxWidth()) { Text("Leave Room") }
+        // Disabled (not hidden) when no room exists yet — mirrors RN's Leave Room button,
+        // which is `disabled={!sdkInstanceRef.current}` rather than conditionally rendered.
+        OutlinedButton(
+            onClick  = { vm.leaveRoom() },
+            enabled  = roomExists,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Leave Room") }
         if (isModerator) {
             Button(
                 onClick  = { vm.closeRoom() },
+                enabled  = roomExists,
                 colors   = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Close Room for Everyone") }
