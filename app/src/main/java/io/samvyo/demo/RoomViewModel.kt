@@ -74,6 +74,36 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     private val _isRoomLocked = MutableStateFlow(false)
     val isRoomLocked: StateFlow<Boolean> = _isRoomLocked.asStateFlow()
 
+    // ── Transient socket reconnect (wifi blip etc. during an active call) ───────
+    // Set while ConnectionState.Failed fires mid-call and SignallingClient is retrying
+    // with its own exponential backoff; cleared on ConnectionState.Reconnected. Does NOT
+    // flip [_ui] to Error — see the connectionState.collect block in observeRoom() below.
+
+    private val _isReconnecting = MutableStateFlow(false)
+    val isReconnecting: StateFlow<Boolean> = _isReconnecting.asStateFlow()
+
+    // ── Viewer count (EVENT-type rooms only) ─────────────────────────────────────
+    // Stays null until the server actually sends one — it only does so for EVENT
+    // rooms, so null-vs-populated doubles as the "is this even an event room" signal
+    // without RoomViewModel needing to separately track the roomType it was given.
+
+    private val _viewerCount = MutableStateFlow<Int?>(null)
+    val viewerCount: StateFlow<Int?> = _viewerCount.asStateFlow()
+
+    // ── P2P mode signals (ROOM_P2P rooms only) ───────────────────────────────────
+    // Both only ever populate when the room actually runs in P2P mode — the SDK
+    // never emits RoomModeChanging/Changed or PeerConnectionFailed for SFU rooms.
+
+    // True from RoomModeChanging until RoomModeChanged — the P2P→SFU auto-migration
+    // window (server-driven once the room crosses its p2pThreshold peer count).
+    private val _isMigratingToSfu = MutableStateFlow(false)
+    val isMigratingToSfu: StateFlow<Boolean> = _isMigratingToSfu.asStateFlow()
+
+    // Peers whose direct P2P connection hard-failed (ICE "failed", not "disconnected" —
+    // see PeerConnectionFailed's doc comment). Cleared on PeerConnected for that peer.
+    private val _peerConnectionFailed = MutableStateFlow<Set<String>>(emptySet())
+    val peerConnectionFailed: StateFlow<Set<String>> = _peerConnectionFailed.asStateFlow()
+
     // ── Local media controls ───────────────────────────────────────────────────
 
     private val _isMicMuted    = MutableStateFlow(false)
@@ -667,10 +697,22 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                 when (state) {
                     is ConnectionState.Connected   ->
                         if (_ui.value is RoomUiState.Connecting) _ui.value = RoomUiState.Ready
-                    is ConnectionState.Reconnected ->
+                    is ConnectionState.Reconnected -> {
+                        _isReconnecting.value = false
                         appendLog("• socket reconnected — ICE restart in progress")
-                    is ConnectionState.Failed      ->
-                        _ui.value = RoomUiState.Error(state.reason)
+                    }
+                    is ConnectionState.Failed      -> {
+                        if (_ui.value is RoomUiState.InCall) {
+                            // Transient — SignallingClient is already retrying with its own
+                            // exponential backoff (see socket.onReconnectExhausted in VideoRoom
+                            // for the give-up path, surfaced below as RoomEvent.Error with code
+                            // "SOCKET_RECONNECT_FAILED"). Don't kick the user out of a live call
+                            // over what's usually a few seconds of dead air.
+                            _isReconnecting.value = true
+                        } else {
+                            _ui.value = RoomUiState.Error(state.reason)
+                        }
+                    }
                     else -> {}
                 }
             }
@@ -721,6 +763,33 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
             is RoomEvent.JoinSuccess -> {
                 _ui.value = RoomUiState.InCall
                 appendLog("✓ JoinSuccess — MediaEngine starting…")
+            }
+
+            // Server couldn't admit us immediately (capacity/org isolation). Always followed
+            // by either JoinRetryScheduled (which owns the user-facing "retrying…" banner
+            // with an actual attempt count) or a terminal JoinFailed — log only here so we
+            // don't show a notification that's immediately superseded by one of those two.
+            is RoomEvent.JoinRejected ->
+                appendLog("⇠ joinRejected: ${event.reason} — retryAfter=${event.retryAfterMs}ms")
+
+            // SDK is about to retry a rejected join — gives an exact attempt count/delay,
+            // unlike the raw JoinRejected above. We stay on RoomUiState.Joining; the retry
+            // itself is entirely handled inside VideoRoom.
+            is RoomEvent.JoinRetryScheduled -> {
+                _notification.value =
+                    "Room busy (${event.reason}) — retrying ${event.attempt}/${event.maxRetries} " +
+                        "in ${event.delayMs / 1000}s…"
+                appendLog("⇠ joinRetryScheduled: attempt ${event.attempt}/${event.maxRetries}, delay=${event.delayMs}ms")
+            }
+
+            // SDK exhausted all automatic join retries (or the rejection was non-retriable,
+            // e.g. org capacity exhausted) — this is terminal. Without this branch the UI
+            // would sit on "Joining…" forever, since nothing else transitions
+            // RoomUiState.Joining away on this path.
+            is RoomEvent.JoinFailed -> {
+                val suffix = if (!event.retriable) " — contact support, retrying will not help." else ""
+                _ui.value = RoomUiState.Error((event.message ?: "Join failed: ${event.reason}") + suffix)
+                appendLog("✗ joinFailed: ${event.reason} (retriable=${event.retriable})")
             }
 
             // Local camera track arrived
@@ -810,9 +879,34 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                 _peerMuteStates.value     = _peerMuteStates.value     - event.peerId
                 _handRaiseList.value      = _handRaiseList.value.filterNot { it.peerId == event.peerId }
                 _pendingUpgradeRequests.value = _pendingUpgradeRequests.value.filterNot { it.peerId == event.peerId }
+                _peerConnectionFailed.value = _peerConnectionFailed.value - event.peerId
                 if (_activeSpeakerId.value == event.peerId) _activeSpeakerId.value = null
                 appendLog("• peer left: ${event.peerId.take(8)}")
             }
+
+            // P2P: ICE reached "connected" for a direct peer link — clear any prior
+            // failed-badge for this peer since they've since recovered.
+            is RoomEvent.PeerConnected -> {
+                _peerConnectionFailed.value = _peerConnectionFailed.value - event.peerId
+                appendLog("• P2P peer connected: ${event.peerId.take(8)}")
+            }
+
+            // P2P: ICE dropped for a direct peer link — often self-heals (mirrors the
+            // transport-level "disconnected" handling used elsewhere in this app), so
+            // this is log-only; PeerConnectionFailed below is the one that badges the tile.
+            is RoomEvent.PeerDisconnected ->
+                appendLog("• P2P peer disconnected: ${event.peerId.take(8)}")
+
+            // P2P: ICE hard-failed for a direct peer link — will not self-heal on its own.
+            // Badge the tile so this reads as a connection problem, not the peer simply
+            // turning off their camera.
+            is RoomEvent.PeerConnectionFailed -> {
+                _peerConnectionFailed.value = _peerConnectionFailed.value + event.peerId
+                appendLog("✗ P2P peer connection failed: ${event.peerId.take(8)}")
+            }
+
+            is RoomEvent.CallStartTime ->
+                appendLog("• call start time: ${event.callStartTime}")
 
             // Recording started / stopped
             is RoomEvent.RecordingStarted -> {
@@ -822,6 +916,14 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
             is RoomEvent.RecordingEnded -> {
                 _isRecording.value = false
                 appendLog("• recording ended")
+            }
+
+            // Recording is queued behind a P2P→SFU migration — RecordingStarted follows
+            // once that completes. isRecordingActive deliberately stays false in between:
+            // the "Stop REC" button would otherwise appear before anything is recording.
+            is RoomEvent.RecordingMigrating -> {
+                _notification.value = "Recording will start shortly…"
+                appendLog("• recording migrating (P2P→SFU)")
             }
 
             // Live streaming started / stopped — same server-driven shape as recording above.
@@ -1024,23 +1126,128 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                 appendLog("• room closed: ${event.reason}")
             }
 
+            // Confirms our own leaveRoom()/closeRoom() went through. Log-only: by the time
+            // this async event reaches us, leaveRoom()/closeRoom() below has already run
+            // resetCallState() synchronously — this isn't the trigger for that transition.
+            is RoomEvent.RoomLeft ->
+                appendLog("• room left: ${event.roomId}")
+
             // Camera successfully switched
             is RoomEvent.VideoInputChanged ->
                 appendLog("• camera → ${event.deviceLabel ?: event.deviceId}")
 
-            // Connection state change
-            is RoomEvent.ConnectionStateChange ->
-                appendLog("• connection: ${event.status}")
+            // Reports which codec actually got negotiated for our video producer vs what was
+            // requested. Log-only: this app never sets preferredVideoCodec (leaves it at the
+            // "auto" default), so fellBack is structurally always false for us today — but the
+            // SDK still emits this for every produce(), so it needs a case rather than falling
+            // through to else.
+            is RoomEvent.CodecProduced ->
+                appendLog("• codec produced [${event.mediaTag}]: ${event.actual}" +
+                    (if (event.fellBack) " (fell back from ${event.preferred})" else ""))
+
+            // Server closed the socket with a per-client terminal code (rate limit, message
+            // too large, send-queue overflow) — SignallingClient has already permanently
+            // disabled its own reconnect loop for this. Reconnecting would just re-trip the
+            // same server-side guard, so — unlike the transient ConnectionState.Failed handled
+            // in the connectionState.collect block below — this must kick the user out even
+            // mid-call; there is no self-healing path to wait for.
+            is RoomEvent.TerminalClose -> {
+                _isReconnecting.value = false
+                _ui.value = RoomUiState.Error(
+                    event.reason ?: "Connection closed (${event.category}, code ${event.code}). Please rejoin."
+                )
+                appendLog("✗ terminal close: ${event.category} (code=${event.code})")
+            }
+
+            // Autoscaler had no record of our peerId on reconnect (grace period elapsed, or
+            // an autoscaler restart lost it) — producer/consumer state is gone server-side.
+            // Per the SDK's own contract the app must leave and rejoin fresh; we can't just
+            // wait this one out like a transient ConnectionState.Failed.
+            is RoomEvent.SessionExpired -> {
+                _isReconnecting.value = false
+                _ui.value = RoomUiState.Error(
+                    event.reason ?: "Your session expired (code ${event.code}). Please rejoin."
+                )
+                appendLog("✗ session expired: code=${event.code}")
+            }
+
+            // Connection state change — [reason] is set e.g. to "server_restart" when the
+            // SFU autoscaler restarts and rebuildMedia silently re-registers our join.
+            is RoomEvent.ConnectionStateChange -> {
+                if (event.reason == "server_restart") {
+                    _notification.value = "Server restarted — reconnecting…"
+                }
+                appendLog("• connection: ${event.status}" + (event.reason?.let { " ($it)" } ?: ""))
+            }
+
+            // EVENT-type rooms only — server pushes this ~1Hz as an audience-size badge.
+            is RoomEvent.ViewerCount ->
+                _viewerCount.value = event.count
+
+            // P2P→SFU auto-migration starting — server-driven once the room crosses its
+            // p2pThreshold peer count. Direct P2P links stay up while the SFU session spins
+            // up underneath, so this is purely an informational banner, not a state change.
+            is RoomEvent.RoomModeChanging -> {
+                _isMigratingToSfu.value = true
+                _notification.value = "Upgrading to group call…"
+                appendLog("• room mode changing: ${event.from} → ${event.to}")
+            }
+
+            // Migration complete — SFU media is now active and all P2P links are torn down.
+            is RoomEvent.RoomModeChanged -> {
+                _isMigratingToSfu.value = false
+                _notification.value = "Now in group call"
+                appendLog("• room mode changed: ${event.from} → ${event.to}")
+            }
+
+            // Generic server info messages (notify / userError / alreadyActive /
+            // passwordDisabled / cIdUpdate). Only userError is surfaced to the user —
+            // the rest, cIdUpdate in particular, are internal bookkeeping, not something
+            // worth interrupting the call for.
+            is RoomEvent.Notification -> {
+                appendLog("• notification [${event.eventType}]: ${event.eventText}")
+                if (event.eventType == "userError" && event.eventText != null) {
+                    _notification.value = event.eventText
+                }
+            }
 
             // SDK error
             is RoomEvent.Error -> {
                 appendLog("✗ [${event.code}] ${event.text}")
-                // Only surface fatal errors as UI errors; non-fatal ones go to log only
-                if (event.code.startsWith("EID") && _ui.value is RoomUiState.InCall) {
-                    _notification.value = "${event.code}: ${event.text}"
-                } else if (_ui.value !is RoomUiState.InCall) {
-                    _ui.value = RoomUiState.Error("[${event.code}] ${event.text}")
+                when {
+                    // SignallingClient exhausted all reconnect attempts (see VideoRoom's
+                    // socket.onReconnectExhausted). Unlike the transient ConnectionState.Failed
+                    // banner in observeRoom() above, this is terminal — the socket will not
+                    // retry again, so this is the one case that must still kick the user back
+                    // to the join screen even mid-call.
+                    event.code == "SOCKET_RECONNECT_FAILED" -> {
+                        _isReconnecting.value = false
+                        _ui.value = RoomUiState.Error(event.text)
+                    }
+                    // Non-fatal mid-call errors — surface as a dismissible banner, not a
+                    // screen change. ICE_RESTART_FAILED/TRANSPORT_CONNECT_FAILED are the two
+                    // new error codes from the reconnect-robustness SDK fixes; without this
+                    // branch they'd match neither condition below and go log-only.
+                    (event.code.startsWith("EID") ||
+                        event.code == "ICE_RESTART_FAILED" ||
+                        event.code == "TRANSPORT_CONNECT_FAILED") &&
+                        _ui.value is RoomUiState.InCall -> {
+                        _notification.value = "${event.code}: ${event.text}"
+                    }
+                    _ui.value !is RoomUiState.InCall ->
+                        _ui.value = RoomUiState.Error("[${event.code}] ${event.text}")
                 }
+            }
+
+            // Server closed our subscription to another peer's stream to free capacity for
+            // a higher-priority stream — that peer did NOT turn off their camera/mic. Without
+            // this, the tile just goes blank with no explanation (looks like a freeze/bug).
+            is RoomEvent.ConsumerPreempted -> {
+                val name = _participants.value.firstOrNull { it.peerId == event.senderPeerId }?.name
+                    ?: event.senderPeerId?.take(8) ?: "a peer"
+                _notification.value = "Stream from $name was paused to free capacity"
+                appendLog("• consumer preempted: ${event.mediaTag ?: "?"} " +
+                    "(peer=${event.senderPeerId?.take(8)}, by=${event.preemptedBy?.take(8)})")
             }
 
             else -> {}
@@ -1095,6 +1302,10 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
         _eglContext.value         = null
         _localPeerType.value      = null
         _isRoomLocked.value       = false
+        _isReconnecting.value     = false
+        _viewerCount.value        = null
+        _isMigratingToSfu.value   = false
+        _peerConnectionFailed.value = emptySet()
         isFrontCamera             = true
         _ui.value                 = RoomUiState.Idle
     }
