@@ -37,9 +37,12 @@ Two repos work together:
 - **Samvyo API credentials** (`ACCESS_KEY` / `SECRET_ACCESS_KEY`) — get these from
   your team lead or the Samvyo dashboard. Don't request these over an insecure
   channel; treat them like any other secret.
+- **A GitHub personal access token with `read:packages` scope** — `mediasoup-client`
+  is published to GitHub Packages (not Maven Central), and that registry requires
+  authentication even for public reads. See step 4 for where this goes.
 - No NDK, no CMake, no native toolchain setup — `mediasoup-client` is pulled as a
-  prebuilt AAR from Maven Central, not compiled from source. If Gradle ever asks
-  you to install an NDK, something else is wrong (see Troubleshooting).
+  prebuilt AAR, not compiled from source. If Gradle ever asks you to install an
+  NDK, something else is wrong (see Troubleshooting).
 
 ## 2. Clone both repos
 
@@ -103,10 +106,39 @@ its own project, run its own build, or touch its own `local.properties`. The dem
 app's build absorbs `samvyo-sdk` as a module of *its own* build the moment step 3's
 path is correct.
 
-## 4. Add your API credentials
+## 4. Add your credentials
 
-Create (or edit) `samvyo-demo-android-app/samvyo-demo-android-app/local.properties`
-— this file is gitignored, so it's the right place for secrets:
+Two unrelated sets of credentials are needed before the first build will succeed —
+one for Gradle to *fetch a dependency*, one for the app to *fetch a session token*
+at runtime. Both are secrets; neither goes in a committed file.
+
+### 4a. GitHub Packages token (needed for Gradle sync to succeed at all)
+
+`mediasoup-client` is published to GitHub Packages
+(`https://maven.pkg.github.com/Samvyo/mediasoup-android-client-latest`), which
+requires authentication for every fetch, including read-only ones by someone
+with repo access. Without this, Gradle sync fails before it gets anywhere near
+compiling code.
+
+Generate a GitHub personal access token with `read:packages` scope
+(GitHub → Settings → Developer settings → Personal access tokens), then add it to
+`~/.gradle/gradle.properties` (**not** the project's own `gradle.properties` —
+that file *is* committed; `~/.gradle/gradle.properties` lives outside any repo):
+
+```properties
+GPR_USER=your-github-username
+GPR_TOKEN=your-personal-access-token
+```
+
+(`settings.gradle.kts` also accepts these as `GITHUB_ACTOR`/`GITHUB_TOKEN`
+environment variables instead, if you'd rather not put them in a file — useful for
+CI. Either source works; the gradle property is simpler for local dev.)
+
+### 4b. Samvyo API credentials (needed at runtime, not build time)
+
+Create (or edit)
+`samvyo-demo-android-app/samvyo-demo-android-app/local.properties` — this file is
+gitignored, so it's the right place for this one:
 
 ```properties
 sdk.dir=/path/to/your/Android/Sdk
@@ -170,7 +202,9 @@ On each device:
    "call screen" to navigate to).
 2. Enter a **Room ID** (anything — just make sure both devices use the exact same
    string) and a display name.
-3. Pick **Room type**: Conferencing or Event.
+3. Pick **Room type**: Conferencing, Event, or P2P (P2P connects peers directly
+   without a media server, auto-upgrading to a group call if enough peers join —
+   see the "Upgrading to group call…" banner if you're testing that path).
 4. Pick a role under **Join as**. For a normal two-person test, make one device
    **Moderator** and the other **Participant** (Moderator unlocks recording,
    permissions panels, live streaming, and other admin-only sections further down
@@ -195,10 +229,14 @@ permissions panels are all further down the same scrolling screen.
 → The `samvyo-sdk` path in `settings.gradle.kts` (step 3) is wrong. Double-check it
 points at the `samvyo-sdk` subfolder *inside* the SDK repo, not the SDK repo's root.
 
-**Build fails trying to resolve `io.github.haiyangwu:mediasoup-client`**
-→ This resolves from Maven Central directly — no JitPack or other repo needed. If it
-fails, check your network/proxy settings rather than adding repositories; nothing
-else should need adding.
+**Build fails trying to resolve `com.samvyo:mediasoup-client`, or a GitHub
+Packages 401/403**
+→ Missing or invalid GitHub Packages credentials (step 4a) — `GPR_USER`/
+`GPR_TOKEN` in `~/.gradle/gradle.properties` (or `GITHUB_ACTOR`/`GITHUB_TOKEN` env
+vars), and the token needs `read:packages` scope. This registry requires auth for
+every fetch, so a missing token fails immediately rather than falling back to
+Maven Central — there's no other repo to add here, it's specifically a
+credentials problem.
 
 **`adb devices` shows nothing, or shows `unauthorized`**
 → Nothing to do with Gradle/the SDK — it's a device/USB debugging issue. Re-check

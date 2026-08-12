@@ -13,10 +13,17 @@ import io.samvyo.sdk.VideoRoom
 import io.samvyo.sdk.VideoSdk
 import io.samvyo.sdk.screen.ScreenCaptureService
 import io.samvyo.sdk.signalling.ConnectionState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Request
+import org.json.JSONObject
 import org.webrtc.Camera2Enumerator
 import org.webrtc.EglBase
 import org.webrtc.VideoTrack
@@ -204,11 +211,11 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
         appendLog("Fetching session token…")
 
         viewModelScope.launch {
-            val token = VideoSdk.fetchSessionToken(
-                accessKey       = BuildConfig.ACCESS_KEY,
-                secretAccessKey = BuildConfig.SECRET_ACCESS_KEY,
-                roomId          = roomId,
-            ).getOrElse {
+            // No ACCESS_KEY/SECRET_ACCESS_KEY in the app — they'd be extractable from the APK.
+            // Instead we ask a customer-run token server (holds the keys server-side, same
+            // react-native-demo-app-server pattern as the RN reference app) for a session token,
+            // sending only the roomId.
+            val token = fetchSessionTokenFromServer(roomId).getOrElse {
                 _ui.value = RoomUiState.Error(it.message ?: "Token fetch failed")
                 appendLog("✗ ${it.message}")
                 return@launch
@@ -1225,18 +1232,44 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                         _ui.value = RoomUiState.Error(event.text)
                     }
                     // Non-fatal mid-call errors — surface as a dismissible banner, not a
-                    // screen change. ICE_RESTART_FAILED/TRANSPORT_CONNECT_FAILED are the two
-                    // new error codes from the reconnect-robustness SDK fixes; without this
-                    // branch they'd match neither condition below and go log-only.
+                    // screen change. EID-prefixed codes are the SDK's own error-code family
+                    // (covers ERR_MIC_ENABLE_FAILED etc.); the rest are non-EID codes from the
+                    // reconnect/transport-robustness SDK work that would otherwise match
+                    // neither branch here and go log-only. ICE_RESTART_FAILED is dead as of
+                    // the transport-recreation change (superseded by TransportRestartFailed
+                    // below) but harmless to keep matching in case older SDK builds still send it.
                     (event.code.startsWith("EID") ||
                         event.code == "ICE_RESTART_FAILED" ||
-                        event.code == "TRANSPORT_CONNECT_FAILED") &&
+                        event.code == "TRANSPORT_CONNECT_FAILED" ||
+                        event.code == "TRANSPORT_CREATE_FAILED" ||
+                        event.code == "TRANSPORT_RECREATE_FAILED" ||
+                        event.code == "SEND_TRACK_REJECTED") &&
                         _ui.value is RoomUiState.InCall -> {
                         _notification.value = "${event.code}: ${event.text}"
                     }
                     _ui.value !is RoomUiState.InCall ->
                         _ui.value = RoomUiState.Error("[${event.code}] ${event.text}")
                 }
+            }
+
+            // Structured recording failure — replaces the generic RoomEvent.Error the SDK used
+            // to send for this, so the app can tell a recording error apart from any other
+            // error without string-matching. The SDK already reset its own recordingStartedByMe
+            // flag before emitting this, so a retry via toggleRecording() will work immediately.
+            is RoomEvent.RecordingError -> {
+                _notification.value = event.title?.let { "$it: ${event.text}" } ?: event.text
+                appendLog("✗ recording error [${event.type ?: "?"}/${event.reason ?: "?"}]: ${event.text}")
+            }
+
+            // ICE restart was rejected server-side (transport no longer exists) — the SDK has
+            // already kicked off recreateSendTransport()/recreateRecvTransport() to recover, so
+            // this is transient like ConnectionState.Failed above, not a dead end. Reuses the
+            // same isReconnecting banner rather than a separate one for what's the same
+            // "media is briefly interrupted while we recover" situation from the user's POV.
+            is RoomEvent.TransportRestartFailed -> {
+                _isReconnecting.value = true
+                appendLog("• ${event.transportType} transport restart failed for " +
+                    "${event.transportId.take(8)} — recreating…")
             }
 
             // Server closed our subscription to another peer's stream to free capacity for
@@ -1318,5 +1351,36 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         room?.leaveRoom()
         stopScreenShareService()
+    }
+
+    // =========================================================================
+    // Session token — fetched from a customer-run server, not embedded keys
+    // =========================================================================
+    // Mirrors the RN reference app's fetchSessionToken(): POST {roomId} to
+    // BuildConfig.TOKEN_SERVER_URL (react-native-demo-app-server pattern — that server
+    // holds ACCESS_KEY/SECRET_ACCESS_KEY in its own env and calls Samvyo's real
+    // /api/siteSetting/sessionToken itself), parse {success, sessionToken} from the response.
+
+    private suspend fun fetchSessionTokenFromServer(roomId: String): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val body = JSONObject().put("roomId", roomId).toString()
+                    .toRequestBody("application/json".toMediaType())
+                val request = Request.Builder()
+                    .url("${BuildConfig.TOKEN_SERVER_URL}/api/create-session-token")
+                    .post(body)
+                    .build()
+                tokenHttpClient.newCall(request).execute().use { response ->
+                    val json = JSONObject(response.body?.string().orEmpty())
+                    if (!response.isSuccessful || !json.optBoolean("success")) {
+                        error(json.optString("error").ifEmpty { "Token server returned ${response.code}" })
+                    }
+                    json.getString("sessionToken")
+                }
+            }
+        }
+
+    companion object {
+        private val tokenHttpClient = OkHttpClient()
     }
 }

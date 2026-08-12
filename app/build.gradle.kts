@@ -5,7 +5,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// Read secret keys from local.properties (this file is gitignored — never committed).
+// Read local dev config from local.properties (this file is gitignored — never committed).
 val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
@@ -26,10 +26,11 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        // Bake the keys into the APK as BuildConfig constants.
-        // The keys are read at compile time from local.properties — they never touch git.
-        buildConfigField("String", "ACCESS_KEY",        "\"${localProps.getProperty("ACCESS_KEY", "")}\"")
-        buildConfigField("String", "SECRET_ACCESS_KEY", "\"${localProps.getProperty("SECRET_ACCESS_KEY", "")}\"")
+        // ACCESS_KEY/SECRET_ACCESS_KEY are deliberately NOT here — bundling them in the app
+        // lets anyone extract them from the APK. Instead the app calls a customer-run token
+        // server (react-native-demo-app-server pattern) that holds the keys server-side and
+        // hands back a session token. Only that server's URL is baked in.
+        buildConfigField("String", "TOKEN_SERVER_URL", "\"${localProps.getProperty("TOKEN_SERVER_URL", "http://10.0.2.2:5100")}\"")
     }
 
     buildFeatures {
@@ -62,4 +63,5 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp) // for fetchSessionTokenFromServer() — see RoomViewModel.kt
 }
