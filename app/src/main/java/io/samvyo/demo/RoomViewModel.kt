@@ -297,11 +297,27 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
         appendLog(if (newMuted) "• mic muted" else "• mic unmuted")
     }
 
+    /**
+     * Uses the hard `disableCam()`/`enableCam()` pair, not the soft `setCameraEnabled()`
+     * pause/resume — matches the fix just applied on the iOS demo app (and RN's own
+     * toggleCamera(), which never had a soft video toggle to begin with). Confirmed live
+     * against the server there: a soft pause still closes the peer's consumer server-side
+     * (consumerClosed, reason producerclose), but a soft resume never creates a new
+     * producer to re-trigger a fresh consumer push, so the other peer's video never came
+     * back. The hard pair sends closeProducerSDK first, so the server knows the old
+     * producer is truly gone, then produces a genuinely new one on re-enable, which does
+     * trigger a fresh consumer for peers.
+     * `_isCameraOff` isn't flipped here — it's synced from the resulting local
+     * VideoStart/VideoEnd events instead (see handleEvent()).
+     */
     fun toggleCamera() {
-        val newOff = !_isCameraOff.value
-        _isCameraOff.value = newOff
-        room?.setCameraEnabled(!newOff)
-        appendLog(if (newOff) "• camera off" else "• camera on")
+        if (_isCameraOff.value) {
+            room?.enableCam()
+            appendLog("⇢ enableCam")
+        } else {
+            room?.disableCam()
+            appendLog("⇢ disableCam")
+        }
     }
 
     fun flipCamera() {
@@ -497,11 +513,28 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     // we use a dedicated messageType string here since our data payload is just the emoji
     // itself, no JSON parsing needed on receipt).
 
+    /**
+     * Cross-platform reality check (confirmed against the actual RN/Flutter/iOS demo apps,
+     * not assumed): none of them use `messageType` to identify a reaction at all — the
+     * marker lives *inside* the JSON-encoded `data` payload as `{"type":"emoji-reaction",
+     * "emoji":...}`. RN JSON-stringifies that object before calling sendCustomMessage, so
+     * its wire `data` is a STRING; Flutter passes the raw object through unstringified, so
+     * its wire `data` is a nested OBJECT — the two don't even agree with each other (Flutter's
+     * own receiver requires `data is Map` and silently drops RN's string form; iOS's parser
+     * requires `data` to be a string and silently drops Flutter's object form). Our SDK's
+     * sendCustomMessage(data: String, ...) forces us into the RN/iOS shape (a string) — we
+     * can't send Flutter's raw-object form even if we wanted to — so this app's own reactions
+     * will interop with RN and iOS but not Flutter (that's Flutter's own receiver bug, not
+     * fixable from here). See handleEvent()'s CustomMessage branch for the matching receive
+     * side, which — unlike sending — is made robust to BOTH shapes.
+     */
     fun sendReaction(emoji: String) {
         room?.sendCustomMessage(
-            data        = emoji,
-            type        = RoomConstants.MSG_TYPE_PUBLIC,
-            messageType = "emoji",
+            data = JSONObject().apply {
+                put("type", "emoji-reaction")
+                put("emoji", emoji)
+            }.toString(),
+            type = "custom",
         )
         // Optimistic local echo — the server doesn't reflect our own CustomMessage back to us,
         // so we append it here exactly like sendChat() does for the local chat bubble.
@@ -803,6 +836,8 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
             is RoomEvent.VideoStart -> {
                 if (event.type == "local") {
                     _localVideoTrack.value = event.track
+                    // enableCam() succeeded — a fresh producer exists again.
+                    _isCameraOff.value = false
                     // Earliest point the camera capturer is guaranteed to exist —
                     // apply a join-screen camera choice now, exactly once.
                     preferredCamera?.let { selectVideoDevice(it) }
@@ -817,6 +852,8 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
             is RoomEvent.VideoEnd -> {
                 if (event.type == "local") {
                     _localVideoTrack.value = null
+                    // disableCam() closed our producer — reflect that in the UI.
+                    _isCameraOff.value = true
                 } else {
                     _remoteVideoTracks.value = _remoteVideoTracks.value - event.peerId
                 }
@@ -1106,18 +1143,30 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                         scope        = event.type ?: RoomConstants.MSG_TYPE_PUBLIC,
                     )
                     appendLog("⇠ chat from $senderName: $text")
-                } else if (event.messageType == "emoji") {
-                    // Same envelope as chat, routed by messageType instead — see sendReaction().
-                    val emoji = event.data?.toString() ?: return
-                    val senderPeerId = event.senderPeerId ?: return
-                    val senderName = _participants.value
-                        .firstOrNull { it.peerId == senderPeerId }?.name
-                        ?: senderPeerId.take(8)
-                    _recentReactions.value = (_recentReactions.value + EmojiReaction(
-                        emoji    = emoji,
-                        fromName = senderName,
-                    )).takeLast(6)
-                    appendLog("⇠ reaction from $senderName: $emoji")
+                } else {
+                    // Not identified by messageType at all — see sendReaction()'s doc
+                    // comment for why. event.data arrives as whatever the SDK's JSON
+                    // parser produced: a String (RN's convention — JSON-stringified
+                    // before sending) or a JSONObject (Flutter's convention — sent
+                    // unstringified). Handle both so we can receive from either.
+                    val obj = when (val data = event.data) {
+                        is JSONObject -> data
+                        is String -> runCatching { JSONObject(data) }.getOrNull()
+                        else -> null
+                    }
+                    val emoji = obj?.takeIf { it.optString("type") == "emoji-reaction" }
+                        ?.optString("emoji")?.takeIf { it.isNotEmpty() }
+                    if (emoji != null) {
+                        val senderPeerId = event.senderPeerId ?: return
+                        val senderName = _participants.value
+                            .firstOrNull { it.peerId == senderPeerId }?.name
+                            ?: senderPeerId.take(8)
+                        _recentReactions.value = (_recentReactions.value + EmojiReaction(
+                            emoji    = emoji,
+                            fromName = senderName,
+                        )).takeLast(6)
+                        appendLog("⇠ reaction from $senderName: $emoji")
+                    }
                 }
             }
 

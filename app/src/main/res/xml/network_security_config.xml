@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android blocks plain HTTP (cleartext) to arbitrary hosts by default since API 28 —
+  needed here only for the local react-native-demo-app-server dev instance
+  (http://localhost:5100, reached via `adb reverse tcp:5100 tcp:5100`). Scoped to
+  localhost only, so the rest of the app's traffic (the real signalling/API server)
+  still requires HTTPS as normal.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>
