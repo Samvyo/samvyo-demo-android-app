@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -92,6 +93,13 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
     val incomingUpgradeInvite  by vm.incomingUpgradeInvite.collectAsState()
     val waitingPeers            by vm.waitingPeers.collectAsState()
     val isOnStage               by vm.isOnStage.collectAsState()
+    val aiSelectableStreams by vm.aiSelectableStreams.collectAsState()
+    val aiTickedPeers        by vm.aiTickedPeers.collectAsState()
+    val isAiAgentActive      by vm.isAiAgentActive.collectAsState()
+    val pendingAiConsent     by vm.pendingAiConsent.collectAsState()
+    val aiConsentError       by vm.aiConsentError.collectAsState()
+    val myAiStreams          by vm.myAiStreams.collectAsState()
+    val aiObservations       by vm.aiObservations.collectAsState()
 
     val videoDevices = remember { vm.listVideoDevices() }
 
@@ -110,11 +118,12 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
     var allowScreenShare  by remember { mutableStateOf(true) }
     var noOfScreenShare   by remember { mutableStateOf("1") }
     var noOfUpgradeReq    by remember { mutableStateOf("5") }
-    var allowPresenterMic by remember { mutableStateOf(true) }
-    var allowPresenterCam by remember { mutableStateOf(true) }
-    var allowPresenterShare by remember { mutableStateOf(true) }
-    var allowParticipantChat by remember { mutableStateOf(true) }
-    var allowParticipantHandRaise by remember { mutableStateOf(true) }
+    var allowPresenterRaiseHand by remember { mutableStateOf(true) }
+    var allowPresenterPublicChat by remember { mutableStateOf(true) }
+    var allowPresenterPrivateChat by remember { mutableStateOf(true) }
+    var allowParticipantRaiseHand by remember { mutableStateOf(true) }
+    var allowParticipantPublicChat by remember { mutableStateOf(true) }
+    var allowParticipantPrivateChat by remember { mutableStateOf(true) }
 
     val context = LocalContext.current
     val screenShareLauncher = rememberLauncherForActivityResult(
@@ -204,6 +213,7 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
                 }) { Text(if (isScreenSharing) "Stop Share" else "Share Screen") }
                 if (isModerator) {
                     OutlinedButton(onClick = { vm.toggleRecording() }) { Text(if (isRecording) "Stop REC" else "Start REC") }
+                    OutlinedButton(onClick = { vm.muteAllParticipants() }) { Text("Mute All") }
                 }
             }
         }
@@ -347,17 +357,18 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
             }) { Text("Save General") }
 
             SectionDivider("Presenter Permissions")
-            ToggleRow("allowMic", allowPresenterMic) { allowPresenterMic = it }
-            ToggleRow("allowCamera", allowPresenterCam) { allowPresenterCam = it }
-            ToggleRow("allowScreenShare", allowPresenterShare) { allowPresenterShare = it }
-            Button(onClick = { vm.applyPresenterSettings(allowPresenterMic, allowPresenterCam, allowPresenterShare) }) {
+            ToggleRow("allowPresenterRaiseHand", allowPresenterRaiseHand) { allowPresenterRaiseHand = it }
+            ToggleRow("allowPresenterPublicChat", allowPresenterPublicChat) { allowPresenterPublicChat = it }
+            ToggleRow("allowPresenterPrivateChat", allowPresenterPrivateChat) { allowPresenterPrivateChat = it }
+            Button(onClick = { vm.applyPresenterSettings(allowPresenterRaiseHand, allowPresenterPublicChat, allowPresenterPrivateChat) }) {
                 Text("Save Presenter")
             }
 
             SectionDivider("Participant Permissions")
-            ToggleRow("allowChat", allowParticipantChat) { allowParticipantChat = it }
-            ToggleRow("allowHandRaise", allowParticipantHandRaise) { allowParticipantHandRaise = it }
-            Button(onClick = { vm.applyParticipantSettings(allowParticipantChat, allowParticipantHandRaise) }) {
+            ToggleRow("allowParticipantRaiseHand", allowParticipantRaiseHand) { allowParticipantRaiseHand = it }
+            ToggleRow("allowParticipantPublicChat", allowParticipantPublicChat) { allowParticipantPublicChat = it }
+            ToggleRow("allowParticipantPrivateChat", allowParticipantPrivateChat) { allowParticipantPrivateChat = it }
+            Button(onClick = { vm.applyParticipantSettings(allowParticipantRaiseHand, allowParticipantPublicChat, allowParticipantPrivateChat) }) {
                 Text("Save Participants")
             }
         }
@@ -396,6 +407,79 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
                         text  = if (e.speaker != null) "${e.speaker}: ${e.transcript}" else e.transcript,
                         style = MaterialTheme.typography.bodySmall,
                         color = if (e.isFinal) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        // ── AI Assistant ───────────────────────────────────────────────────────
+        SectionDivider("AI Assistant")
+        if (isModerator) {
+            Text(
+                text  = "Select streams to analyse (by participant)",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (aiSelectableStreams.isEmpty()) {
+                Text(
+                    "No publishing streams available",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else {
+                // Grouped by peer, not by individual stream — startAiAgent() only
+                // accepts peer IDs, not per-mediaTag targets (see toggleAiPeerTick's
+                // doc comment in RoomViewModel).
+                aiSelectableStreams.map { it.peerId }.distinct().forEach { pid ->
+                    val tags = aiSelectableStreams.filter { it.peerId == pid }.joinToString { it.mediaTag }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(checked = pid in aiTickedPeers, onCheckedChange = { vm.toggleAiPeerTick(pid) })
+                        Text("${participantName(participants, pid)} — $tags", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { vm.loadAiSelectableStreams() }) { Text("Refresh") }
+                Button(onClick = { vm.applyAiSelection() }) {
+                    Text(if (aiTickedPeers.isEmpty()) "Stop AI Agent" else "Apply Selection")
+                }
+            }
+            if (isAiAgentActive) {
+                Text("● AI agent is active", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        // Everyone's own streams — independent of the moderator's picker above.
+        // canGrant/canRevoke come straight from the server (AiMyConsentStream), never
+        // inferred locally, since only the server knows why a stream is in its current state.
+        if (myAiStreams.isNotEmpty()) {
+            Text("Your streams", style = MaterialTheme.typography.bodySmall)
+            myAiStreams.forEach { s ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "${s.mediaTag} — ${s.state ?: "not asked yet"}",
+                        style    = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (s.canGrant) TextButton(onClick = { vm.grantAiConsent(s.mediaTag) }) { Text("Allow") }
+                    if (s.canRevoke) TextButton(onClick = { vm.revokeAiConsent(s.mediaTag) }) { Text("Stop") }
+                }
+            }
+        }
+        if (aiConsentError != null) {
+            Text(aiConsentError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        // Live observations feed — everyone. Deliberately doesn't render AiTranscript;
+        // relaying transcripts is a separate, per-deployment privacy decision.
+        if (aiObservations.isNotEmpty()) {
+            Text("Observations", style = MaterialTheme.typography.bodySmall)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                aiObservations.takeLast(20).reversed().forEach { obs ->
+                    Text(
+                        text  = "${participantName(participants, obs.senderPeerId)} (${obs.source ?: "?"}): ${obs.payload}",
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
             }
@@ -493,6 +577,46 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
                     }
                 }
             },
+        )
+    }
+
+    // Driven entirely by pendingAiConsent state, not a one-shot showDialog() call — a
+    // real bug (fixed on the Flutter side, see SDK_UPDATE_FIXES.md) was a fire-and-forget
+    // dialog that never closed because nothing was actually watching the server's clock.
+    // State-driven means this recomposes/disappears automatically the moment
+    // pendingAiConsent changes, including on a server-side aiConsentExpired.
+    val consentRequest = pendingAiConsent
+    if (consentRequest != null) {
+        // Keyed on consentRequest so a NEW request never inherits ticks left over
+        // from a previous one — matches Flutter's _aiConsentChecked.clear() on
+        // every fresh AiConsentRequestEvent.
+        var checkedTags by remember(consentRequest) { mutableStateOf(emptySet<String>()) }
+        AlertDialog(
+            onDismissRequest = { /* force an explicit Allow/Decline — no swipe-to-dismiss */ },
+            title = { Text("Allow the AI assistant?") },
+            text = {
+                Column {
+                    Text(
+                        "A moderator has asked the AI assistant to analyse the following. " +
+                            "Choose what you're comfortable sharing — nothing is analysed unless you allow it.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    // Default UNCHECKED — consent is opt-in; a pre-ticked box isn't consent.
+                    consentRequest.streams.forEach { stream ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = stream.mediaTag in checkedTags,
+                                onCheckedChange = { checked ->
+                                    checkedTags = if (checked) checkedTags + stream.mediaTag else checkedTags - stream.mediaTag
+                                },
+                            )
+                            Text(stream.mediaTag)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { vm.respondAiConsent(checkedTags) }) { Text("Allow selected") } },
+            dismissButton = { TextButton(onClick = { vm.respondAiConsent(false) }) { Text("Decline") } },
         )
     }
 

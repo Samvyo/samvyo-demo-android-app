@@ -185,6 +185,41 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     private val _localPeerType = MutableStateFlow<String?>(null)
     val localPeerType: StateFlow<String?> = _localPeerType.asStateFlow()
 
+    // ── AI Agent ────────────────────────────────────────────────────────────────
+    // Four independent pieces — see SDK_UPDATE_FIXES.md's 2026-08-24 entry for the full
+    // design rationale. State here mirrors what VideoRoom itself already tracks
+    // (getPendingAiConsent()/getAiMyConsent()/getAiObservations()) instead of being
+    // re-derived locally, so a late-mounting UI or a server-driven expiry can never
+    // drift out of sync with what the server actually decided.
+
+    // Moderator's stream picker — one row per (peerId, mediaTag) the server says can be
+    // added right now. startAiAgent() only accepts a list of PEER ids, not per-mediaTag
+    // targets, so ticks are tracked per peerId even though the picker's rows are per-stream.
+    private val _aiSelectableStreams = MutableStateFlow<List<RoomEvent.AiSelectableStream>>(emptyList())
+    val aiSelectableStreams: StateFlow<List<RoomEvent.AiSelectableStream>> = _aiSelectableStreams.asStateFlow()
+
+    private val _aiTickedPeers = MutableStateFlow<Set<String>>(emptySet())
+    val aiTickedPeers: StateFlow<Set<String>> = _aiTickedPeers.asStateFlow()
+
+    private val _isAiAgentActive = MutableStateFlow(false)
+    val isAiAgentActive: StateFlow<Boolean> = _isAiAgentActive.asStateFlow()
+
+    // The one pending consent request for THIS device, if any. Kept in lockstep with
+    // VideoRoom.getPendingAiConsent() — the SDK narrows/clears its own copy internally
+    // on aiConsentExpired, so we mirror it rather than computing expiry ourselves.
+    private val _pendingAiConsent = MutableStateFlow<RoomEvent.AiConsentRequest?>(null)
+    val pendingAiConsent: StateFlow<RoomEvent.AiConsentRequest?> = _pendingAiConsent.asStateFlow()
+
+    private val _aiConsentError = MutableStateFlow<String?>(null)
+    val aiConsentError: StateFlow<String?> = _aiConsentError.asStateFlow()
+
+    // This device's own streams' AI consent state — independent of the moderator's picker.
+    private val _myAiStreams = MutableStateFlow<List<RoomEvent.AiMyConsentStream>>(emptyList())
+    val myAiStreams: StateFlow<List<RoomEvent.AiMyConsentStream>> = _myAiStreams.asStateFlow()
+
+    private val _aiObservations = MutableStateFlow<List<RoomEvent.AiAnalysis>>(emptyList())
+    val aiObservations: StateFlow<List<RoomEvent.AiAnalysis>> = _aiObservations.asStateFlow()
+
     // ── Session ────────────────────────────────────────────────────────────────
 
     private var room: VideoRoom? = null
@@ -486,20 +521,29 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
         val trimmed = text.trim()
         if (trimmed.isBlank()) return
         val target = _selectedChatReceiver.value
+        val scope = if (target != null) RoomConstants.MSG_TYPE_PRIVATE else RoomConstants.MSG_TYPE_PUBLIC
         room?.sendCustomMessage(
             data           = trimmed,
-            // A receiver picked → private + routed to that one peer, matching how the
-            // RN app's "Sending to: X" picker drives the exact same two fields.
-            type           = if (target != null) RoomConstants.MSG_TYPE_PRIVATE else RoomConstants.MSG_TYPE_PUBLIC,
+            // `type` identifies the message KIND ("chat"), `messageType` carries the
+            // public/private SCOPE — confirmed by reading both the RN reference app's
+            // sendCustomMessage(text, 'chat', receiverPeerId, senderType, scope) call
+            // and the Flutter demo app's identical convention directly. This was
+            // previously inverted here (type=scope, messageType="chat"), which meant a
+            // chat message sent by this app was never recognized as chat by RN/Flutter's
+            // own `message.type === 'chat'` check on receipt, and this app's own receive
+            // side (`event.messageType == "chat"`) never matched an RN/Flutter sender's
+            // `messageType: scope` either — chat was silently broken in both directions
+            // cross-platform. See SDK_UPDATE_FIXES.md's 2026-08-24 entry.
+            type           = "chat",
             receiverPeerId = target,
-            messageType    = "chat",
+            messageType    = scope,
         )
         _chatMessages.value = _chatMessages.value + ChatMessage(
             senderPeerId = room?.peerId ?: "",
             senderName   = room?.peerName ?: "Me",
             text         = trimmed,
             isLocal      = true,
-            scope        = if (target != null) RoomConstants.MSG_TYPE_PRIVATE else RoomConstants.MSG_TYPE_PUBLIC,
+            scope        = scope,
         )
         appendLog("⇢ chat${if (target != null) " (private to ${target.take(8)})" else ""}: $trimmed")
     }
@@ -562,6 +606,16 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     fun downgradePeer(peerId: String) {
         room?.downgradeParticipant(peerId)
         appendLog("⇢ downgraded $peerId")
+    }
+
+    /**
+     * Force-mutes every other participant's mic in one call — added to the SDK
+     * in this same pass (see SDK_UPDATE_FIXES.md's 2026-08-24 entry); previously
+     * documented here as a known gap with no per-peer workaround worth building.
+     */
+    fun muteAllParticipants() {
+        room?.muteAllParticipants()
+        appendLog("⇢ muteAllParticipants")
     }
 
     // =========================================================================
@@ -649,19 +703,20 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
         appendLog("⇢ applied general room settings")
     }
 
-    fun applyPresenterSettings(allowMic: Boolean, allowCamera: Boolean, allowScreenShare: Boolean) {
+    fun applyPresenterSettings(allowRaiseHand: Boolean, allowPublicChat: Boolean, allowPrivateChat: Boolean) {
         room?.handlePresenterSettings(
-            allowMic         = allowMic,
-            allowCamera      = allowCamera,
-            allowScreenShare = allowScreenShare,
+            allowPresenterRaiseHand   = allowRaiseHand,
+            allowPresenterPublicChat  = allowPublicChat,
+            allowPresenterPrivateChat = allowPrivateChat,
         )
         appendLog("⇢ applied presenter permissions")
     }
 
-    fun applyParticipantSettings(allowChat: Boolean, allowHandRaise: Boolean) {
+    fun applyParticipantSettings(allowRaiseHand: Boolean, allowPublicChat: Boolean, allowPrivateChat: Boolean) {
         room?.handleParticipantSettings(
-            allowChat      = allowChat,
-            allowHandRaise = allowHandRaise,
+            allowParticipantRaiseHand   = allowRaiseHand,
+            allowParticipantPublicChat  = allowPublicChat,
+            allowParticipantPrivateChat = allowPrivateChat,
         )
         appendLog("⇢ applied participant permissions")
     }
@@ -710,6 +765,84 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
         room?.unstagePeers(listOf(myId))
         _isOnStage.value = false
         appendLog("⇢ moved back stage")
+    }
+
+    // =========================================================================
+    // AI Agent
+    // =========================================================================
+
+    /** Moderator only: ask the server which streams can currently be added to the AI selection. */
+    fun loadAiSelectableStreams() {
+        room?.requestAiSelectableStreams()
+        appendLog("⇢ requestAiSelectableStreams")
+    }
+
+    /** Moderator only: tick/untick one peer's streams in the picker. */
+    fun toggleAiPeerTick(peerId: String) {
+        _aiTickedPeers.value = if (peerId in _aiTickedPeers.value) {
+            _aiTickedPeers.value - peerId
+        } else {
+            _aiTickedPeers.value + peerId
+        }
+    }
+
+    /**
+     * Sends the picker's CURRENT full tick-state. startAiAgent() is a complete
+     * re-declaration of who the agent watches, not an incremental add — so this must
+     * always be called with everything that should end up selected, not just what
+     * changed. An empty selection is sent as stopAiAgent(), not startAiAgent(emptyList())
+     * — the server explicitly refuses an empty targets list (a billing guard against
+     * accidentally widening the analysis to the whole room).
+     */
+    fun applyAiSelection() {
+        if (_aiTickedPeers.value.isEmpty()) {
+            room?.stopAiAgent()
+            appendLog("⇢ stopAiAgent")
+        } else {
+            room?.startAiAgent(targets = _aiTickedPeers.value.map { VideoRoom.AiTargetSpec(it) })
+            appendLog("⇢ startAiAgent targets=${_aiTickedPeers.value}")
+        }
+    }
+
+    /**
+     * Answers the one pending consent request for this device. respondToAiConsent() is
+     * all-or-nothing across every stream in that request (the SDK sends the same
+     * [granted] value for each) — partial per-stream answers aren't part of this call;
+     * use grantAiConsent()/revokeAiConsent() below to change a single stream later,
+     * independent of this initial answer.
+     */
+    fun respondAiConsent(granted: Boolean) {
+        room?.respondToAiConsent(granted)
+        // Mirror the SDK's own bookkeeping — respondToAiConsent() clears its internal
+        // pending request only after the frame is actually sent, so read it back rather
+        // than assuming this call succeeded.
+        _pendingAiConsent.value = room?.getPendingAiConsent()
+        appendLog("⇢ respondToAiConsent granted=$granted")
+    }
+
+    /**
+     * Per-stream answer — only [grantedMediaTags] are granted, every other
+     * requested stream is denied. Matches Flutter's consent dialog, which
+     * offers a checkbox per stream rather than one Allow/Decline for
+     * everything; uses the `Set<String>` overload added to the SDK in the
+     * same pass that found this app's dialog was still all-or-nothing.
+     */
+    fun respondAiConsent(grantedMediaTags: Set<String>) {
+        room?.respondToAiConsent(grantedMediaTags)
+        _pendingAiConsent.value = room?.getPendingAiConsent()
+        appendLog("⇢ respondToAiConsent granted=$grantedMediaTags")
+    }
+
+    /** Self-service: grant consent for one of your own streams, independent of any prompt. */
+    fun grantAiConsent(mediaTag: String) {
+        room?.grantAiConsent(listOf(mediaTag))
+        appendLog("⇢ grantAiConsent $mediaTag")
+    }
+
+    /** Self-service: revoke a consent you previously gave, mid-call. */
+    fun revokeAiConsent(mediaTag: String) {
+        room?.revokeAiConsent(listOf(mediaTag))
+        appendLog("⇢ revokeAiConsent $mediaTag")
     }
 
     // =========================================================================
@@ -803,6 +936,15 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
             is RoomEvent.JoinSuccess -> {
                 _ui.value = RoomUiState.InCall
                 appendLog("✓ JoinSuccess — MediaEngine starting…")
+                // Seed AI state from the SDK's own synchronous getters — covers a
+                // reconnect mid-call re-firing JoinSuccess after some of this was
+                // already set server-side, so a freshly (re)mounted panel isn't blank.
+                _pendingAiConsent.value = r.getPendingAiConsent()
+                _myAiStreams.value = r.getAiMyConsent()?.streams ?: emptyList()
+                _aiObservations.value = r.getAiObservations()
+                if (_localPeerType.value == RoomConstants.PEER_MODERATOR) {
+                    r.requestAiSelectableStreams()
+                }
             }
 
             // Server couldn't admit us immediately (capacity/org isolation). Always followed
@@ -1127,7 +1269,19 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
 
             // Incoming chat message
             is RoomEvent.CustomMessage -> {
-                if (event.messageType == "chat") {
+                // The server echoes our own sendCustomMessage() back to us too. Both
+                // sendChat() and sendReaction() already add an optimistic local entry
+                // when we act, so without this guard our own message/reaction would be
+                // added a second time once its echo arrives here. This guard was a
+                // silent no-op until the matching SDK fix (VideoRoom.onCustomMessage()
+                // now reads the sender identity from the wire's actual "from" key
+                // instead of the never-sent "peerId") — before that, event.senderPeerId
+                // was always null for every incoming custom message, self or otherwise,
+                // so this app never double-counted but also never showed anyone else's
+                // chat or reactions at all. See SDK_UPDATE_FIXES.md's 2026-08-24 entry.
+                if (event.senderPeerId != null && event.senderPeerId == r.peerId) return
+
+                if (event.type == "chat") {
                     val text = event.data?.toString() ?: return
                     val senderPeerId = event.senderPeerId ?: return
                     val senderName = _participants.value
@@ -1138,9 +1292,12 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                         senderName   = senderName,
                         text         = text,
                         isLocal      = false,
-                        // event.type carries back the same MSG_TYPE_PUBLIC/PRIVATE wire
-                        // value we sent — used only to render the "(Private)" bubble label.
-                        scope        = event.type ?: RoomConstants.MSG_TYPE_PUBLIC,
+                        // event.messageType carries back the same MSG_TYPE_PUBLIC/PRIVATE
+                        // wire value we sent — used only to render the "(Private)" bubble
+                        // label. See sendChat()'s doc comment: `type` identifies the
+                        // message kind ("chat"), `messageType` carries the scope — this
+                        // was inverted here until the 2026-08-24 fix.
+                        scope        = event.messageType ?: RoomConstants.MSG_TYPE_PUBLIC,
                     )
                     appendLog("⇠ chat from $senderName: $text")
                 } else {
@@ -1332,6 +1489,75 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                     "(peer=${event.senderPeerId?.take(8)}, by=${event.preemptedBy?.take(8)})")
             }
 
+            // Server refused to let us consume a peer's track — log-only so a denial is
+            // visible during testing instead of the tile just silently never appearing.
+            is RoomEvent.ConsumerAdmissionDenied ->
+                appendLog("⇠ consumer admission denied: ${event.data}")
+
+            // Authoritative, server-pushed role change (fires on a 4410/4411 close code,
+            // before the reconnect finishes) — earlier than this app's own local
+            // _localPeerType bookkeeping. Log-only for now; not urgent to replace the
+            // existing local tracking, same conclusion the SDK's own doc comment draws.
+            is RoomEvent.ParticipantTypeChanged ->
+                appendLog("⇠ role changed: ${event.participantType} (${event.reason})")
+
+            // ── AI Agent ──────────────────────────────────────────────────────────
+            // See SDK_UPDATE_FIXES.md's 2026-08-24 entry for the full design.
+
+            is RoomEvent.AiAgentStarted -> {
+                _isAiAgentActive.value = true
+                appendLog("⇠ AI agent started: attached=${event.attached}/${event.requested} wholeRoom=${event.wholeRoom}")
+            }
+
+            is RoomEvent.AiAgentError -> {
+                if (event.retracted) _isAiAgentActive.value = false
+                _notification.value = event.text ?: "AI agent error"
+                appendLog("✗ AI agent error: ${event.text} (retracted=${event.retracted})")
+            }
+
+            is RoomEvent.AiEnded -> {
+                _isAiAgentActive.value = false
+                appendLog("⇠ AI agent ended: ${event.reason ?: "?"}")
+            }
+
+            // A consent window opened, narrowed, or closed for THIS device — always
+            // re-read from the SDK's own copy rather than tracking it independently.
+            // VideoRoom narrows/clears its pending request itself on aiConsentExpired,
+            // so this never needs a client-side timer or a guess at when it closed.
+            is RoomEvent.AiConsentRequest -> {
+                _pendingAiConsent.value = event
+                _aiConsentError.value = null
+                appendLog("⇠ AI consent requested: ${event.streams.map { it.mediaTag }}")
+            }
+            is RoomEvent.AiConsentExpired -> {
+                _pendingAiConsent.value = r.getPendingAiConsent()
+                appendLog("⇠ AI consent expired: ${event.streams.map { it.mediaTag }}")
+            }
+            is RoomEvent.AiConsentNotApplied -> {
+                _aiConsentError.value = "That request has already closed, so your answer was not applied."
+                appendLog("⇠ AI consent not applied: ${event.streams.map { it.mediaTag }}")
+            }
+
+            is RoomEvent.AiSelectableStreams -> {
+                _aiSelectableStreams.value = event.streams
+                appendLog("⇠ AI selectable streams: ${event.streams.size}")
+            }
+
+            is RoomEvent.AiMyConsent -> {
+                _myAiStreams.value = event.streams
+                appendLog("⇠ AI my-consent: ${event.streams.size} stream(s)")
+            }
+
+            // One AI analysis frame — keep the last 50, same cap the SDK's own ring buffer uses.
+            is RoomEvent.AiAnalysis ->
+                _aiObservations.value = (_aiObservations.value + event).takeLast(50)
+
+            is RoomEvent.AiState ->
+                appendLog("⇠ AI state: ${event.state}" + (event.utterance?.let { " — $it" } ?: ""))
+
+            is RoomEvent.AiError ->
+                appendLog("✗ AI error: ${event.data}")
+
             else -> {}
         }
     }
@@ -1388,6 +1614,13 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
         _viewerCount.value        = null
         _isMigratingToSfu.value   = false
         _peerConnectionFailed.value = emptySet()
+        _aiSelectableStreams.value = emptyList()
+        _aiTickedPeers.value      = emptySet()
+        _isAiAgentActive.value    = false
+        _pendingAiConsent.value   = null
+        _aiConsentError.value     = null
+        _myAiStreams.value        = emptyList()
+        _aiObservations.value     = emptyList()
         isFrontCamera             = true
         _ui.value                 = RoomUiState.Idle
     }
@@ -1422,7 +1655,12 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                 tokenHttpClient.newCall(request).execute().use { response ->
                     val json = JSONObject(response.body?.string().orEmpty())
                     if (!response.isSuccessful || !json.optBoolean("success")) {
-                        error(json.optString("error").ifEmpty { "Token server returned ${response.code}" })
+                        // react-native-demo-app-server always sends its error text under
+                        // "message", never "error" (confirmed by reading server.js directly)
+                        // — reading "error" here silently dropped every real failure reason
+                        // ("roomId is required", "Invalid or expired token", etc.) in favor
+                        // of a generic fallback string.
+                        error(json.optString("message").ifEmpty { "Token server returned ${response.code}" })
                     }
                     json.getString("sessionToken")
                 }

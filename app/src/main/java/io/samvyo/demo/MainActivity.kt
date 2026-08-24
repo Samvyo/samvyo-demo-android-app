@@ -3,6 +3,7 @@ package io.samvyo.demo
 import android.Manifest
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -37,6 +38,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -82,6 +86,8 @@ fun RoomScreen(vm: RoomViewModel = viewModel()) {
     var showDevicePicker by remember { mutableStateOf(false) }
 
     val log   by vm.log.collectAsState()
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
     val editable = state is RoomUiState.Idle || state is RoomUiState.Error
     // Mirrors the RN reference app's `sdkInstanceRef.current` truthiness check — true from
     // the moment initRoom() creates a room/SDK instance (Connecting) through InCall, false
@@ -352,7 +358,20 @@ fun RoomScreen(vm: RoomViewModel = viewModel()) {
 
         // WebSocket debug log
         HorizontalDivider()
-        Text("Socket log", style = MaterialTheme.typography.titleSmall)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Socket log", style = MaterialTheme.typography.titleSmall)
+            // Only way to get the log's content off-device — the Text lines below have
+            // no long-press-to-select of their own. Matches the same button added to the
+            // Flutter demo app's diagnostic log for the same reason.
+            TextButton(onClick = {
+                clipboardManager.setText(AnnotatedString(log.joinToString("\n")))
+                Toast.makeText(context, "Copied ${log.size} log lines", Toast.LENGTH_SHORT).show()
+            }) { Text("Copy") }
+        }
         Column(modifier = Modifier.fillMaxWidth()) {
             if (log.isEmpty()) {
                 Text("(no activity yet)", color = MaterialTheme.colorScheme.outline, fontSize = 12.sp)
