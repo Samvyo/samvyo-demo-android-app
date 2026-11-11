@@ -921,7 +921,18 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
 
         // 4. All SDK events
         viewModelScope.launch {
-            r.events.collect { event -> handleEvent(event, r) }
+            r.events.collect { event ->
+                // LIVE-TEST logging (debug builds only): every SDK event, in arrival order, so a
+                // device run can be checked from `adb logcat -s SamvyoEvent`. Event payloads carry
+                // no credentials (tokens / TURN secrets never appear in RoomEvent).
+                if (BuildConfig.DEBUG) android.util.Log.d("SamvyoEvent", event.toString())
+                handleEvent(event, r)
+            }
+        }
+        // LIVE-TEST: inbound server message IDS only (never the body — bodies carry
+        // iceServers TURN credentials, N216). Debug builds only.
+        if (BuildConfig.DEBUG) viewModelScope.launch {
+            r.serverMessages.collect { android.util.Log.d("SamvyoWire", "<- ${it.id}") }
         }
     }
 
@@ -1332,7 +1343,9 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                 _notification.value = when (event.reason) {
                     "moderator_ended"      -> "The meeting was ended by the host."
                     "removed_by_moderator" -> "You were removed from the meeting."
-                    else                   -> "Room closed: ${event.reason}"
+                    // reason is null when the server gave none (JS/RN payload); show the
+                    // stable category instead ("moderator_closed" / "duration_limit").
+                    else                   -> "Room closed: ${event.reason ?: event.category}"
                 }
                 stopScreenShareService()
                 resetCallState()
@@ -1366,6 +1379,11 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
             // mid-call; there is no self-healing path to wait for.
             is RoomEvent.TerminalClose -> {
                 _isReconnecting.value = false
+                // The SDK released the call (RN/JS close() parity): drop every tile so no
+                // renderer stays bound to an ended track, exactly like RoomClosed below.
+                // resetCallState() sets Idle, so the Error is set AFTER it.
+                stopScreenShareService()
+                resetCallState()
                 _ui.value = RoomUiState.Error(
                     event.reason ?: "Connection closed (${event.category}, code ${event.code}). Please rejoin."
                 )
@@ -1378,6 +1396,11 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
             // wait this one out like a transient ConnectionState.Failed.
             is RoomEvent.SessionExpired -> {
                 _isReconnecting.value = false
+                // The SDK released the call (RN/JS close() parity): drop every tile so no
+                // renderer stays bound to an ended track, exactly like RoomClosed below.
+                // resetCallState() sets Idle, so the Error is set AFTER it.
+                stopScreenShareService()
+                resetCallState()
                 _ui.value = RoomUiState.Error(
                     event.reason ?: "Your session expired (code ${event.code}). Please rejoin."
                 )
