@@ -2,7 +2,6 @@ package io.samvyo.demo
 
 import android.app.Application
 import android.content.Intent
-import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.samvyo.sdk.JoinState
@@ -11,7 +10,6 @@ import io.samvyo.sdk.RoomConstants
 import io.samvyo.sdk.RoomEvent
 import io.samvyo.sdk.VideoRoom
 import io.samvyo.sdk.VideoSdk
-import io.samvyo.sdk.screen.ScreenCaptureService
 import io.samvyo.sdk.signalling.ConnectionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -308,7 +306,6 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     /** Leave the room (only we leave; others stay). */
     fun leaveRoom() {
         room?.leaveRoom()
-        stopScreenShareService()
         resetCallState()
         appendLog("⇢ left room")
     }
@@ -316,7 +313,6 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     /** End the room for everyone (moderator only). */
     fun closeRoom() {
         room?.closeRoom()
-        stopScreenShareService()
         resetCallState()
         appendLog("⇢ room closed by moderator")
     }
@@ -411,31 +407,20 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     // =========================================================================
 
     /**
-     * Called after the user grants MediaProjection permission.
-     * [resultCode] and [projectionData] come from the system "Start recording?" dialog result.
-     * The ScreenCaptureService must be started before calling room.enableShare().
+     * Called with the result of the system "Start recording or casting?" prompt — also when the user
+     * cancelled (the SDK then reports a typed Error EID013, like RN's REID013).
+     * The SDK starts and stops its own screen-capture foreground service (NB-31): before, this app
+     * started it here and called enableShare() in the same main-thread callback, so the service was
+     * not in the foreground yet when the capture asked for the projection (REID014, no share).
      */
-    fun startScreenShare(resultCode: Int, projectionData: Intent) {
-        val serviceIntent = Intent(getApplication(), ScreenCaptureService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getApplication<Application>().startForegroundService(serviceIntent)
-        } else {
-            getApplication<Application>().startService(serviceIntent)
-        }
+    fun startScreenShare(resultCode: Int, projectionData: Intent?) {
         room?.enableShare(resultCode, projectionData)
-        appendLog("⇢ screen share started")
+        appendLog("⇢ screen share requested")
     }
 
     fun stopScreenShare() {
         room?.disableShare()
-        stopScreenShareService()
         appendLog("⇢ screen share stopped")
-    }
-
-    private fun stopScreenShareService() {
-        getApplication<Application>().stopService(
-            Intent(getApplication(), ScreenCaptureService::class.java)
-        )
     }
 
     // =========================================================================
@@ -1036,7 +1021,6 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
             // Our own screen share stopped
             is RoomEvent.ScreenShareStopped -> {
                 _isScreenSharing.value = false
-                stopScreenShareService()
                 appendLog("• our screen share ended")
             }
 
@@ -1347,7 +1331,6 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                     // stable category instead ("moderator_closed" / "duration_limit").
                     else                   -> "Room closed: ${event.reason ?: event.category}"
                 }
-                stopScreenShareService()
                 resetCallState()
                 appendLog("• room closed: ${event.reason}")
             }
@@ -1382,7 +1365,6 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                 // The SDK released the call (RN/JS close() parity): drop every tile so no
                 // renderer stays bound to an ended track, exactly like RoomClosed below.
                 // resetCallState() sets Idle, so the Error is set AFTER it.
-                stopScreenShareService()
                 resetCallState()
                 _ui.value = RoomUiState.Error(
                     event.reason ?: "Connection closed (${event.category}, code ${event.code}). Please rejoin."
@@ -1399,7 +1381,6 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
                 // The SDK released the call (RN/JS close() parity): drop every tile so no
                 // renderer stays bound to an ended track, exactly like RoomClosed below.
                 // resetCallState() sets Idle, so the Error is set AFTER it.
-                stopScreenShareService()
                 resetCallState()
                 _ui.value = RoomUiState.Error(
                     event.reason ?: "Your session expired (code ${event.code}). Please rejoin."
@@ -1655,7 +1636,6 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         room?.leaveRoom()
-        stopScreenShareService()
     }
 
     // =========================================================================

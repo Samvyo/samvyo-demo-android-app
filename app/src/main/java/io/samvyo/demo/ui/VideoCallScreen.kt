@@ -1,6 +1,5 @@
 package io.samvyo.demo.ui
 
-import android.app.Activity
 import android.content.Context
 import android.media.projection.MediaProjectionManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -129,9 +128,8 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
     val screenShareLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            vm.startScreenShare(result.resultCode, result.data!!)
-        }
+        // Passed on also when cancelled: the SDK answers with a typed Error (EID013), shown in the log.
+        vm.startScreenShare(result.resultCode, result.data)
     }
 
     Column(

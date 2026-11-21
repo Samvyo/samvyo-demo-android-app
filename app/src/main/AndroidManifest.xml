@@ -30,8 +30,9 @@
             </intent-filter>
         </activity>
 
-        <!-- SDK's foreground service for screen capture on Android 10+.
-             Must be declared here (in the host app manifest) — SDK manifest alone is not enough.
+        <!-- SDK's foreground service for screen capture on Android 10+. The SDK manifest already
+             declares it (merged in); repeated here only to make it visible. The SDK starts and stops
+             it itself around the share (NB-31) — the app never starts it.
              android:foregroundServiceType="mediaProjection" is required by Android 10+ (API 29+). -->
         <service
             android:name="io.samvyo.sdk.screen.ScreenCaptureService"
