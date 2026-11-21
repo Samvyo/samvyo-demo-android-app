@@ -4,7 +4,9 @@ import android.content.Context
 import android.media.projection.MediaProjectionManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -23,6 +26,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -142,13 +146,36 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
         val egl = eglContext
         if (egl != null) {
             if (localTrack != null && !isCameraOff) {
-                Text("You", style = MaterialTheme.typography.labelMedium)
-                VideoRenderer(
-                    track      = localTrack!!,
-                    eglContext = egl,
-                    mirror     = true,
-                    modifier   = Modifier.fillMaxWidth().height(200.dp),
+                Text(
+                    text  = if (isMicMuted) "You 🔇" else "You",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isMicMuted) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurface,
                 )
+                // Box lets us layer the mute badge over the video tile without
+                // a separate Row/Column that would add unwanted spacing.
+                Box {
+                    VideoRenderer(
+                        track      = localTrack!!,
+                        eglContext = egl,
+                        mirror     = true,
+                        modifier   = Modifier.fillMaxWidth().height(200.dp),
+                    )
+                    if (isMicMuted) {
+                        Text(
+                            text     = "🔇",
+                            fontSize = 22.sp,
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(8.dp)
+                                .background(
+                                    color  = Color.Black.copy(alpha = 0.55f),
+                                    shape  = RoundedCornerShape(4.dp),
+                                )
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                }
             }
             screenTracks.forEach { (pid, track) ->
                 Text("Screen share: ${participantName(participants, pid)}", style = MaterialTheme.typography.labelMedium)
