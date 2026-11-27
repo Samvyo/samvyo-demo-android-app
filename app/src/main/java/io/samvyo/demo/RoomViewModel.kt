@@ -709,8 +709,11 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     // =========================================================================
     // Stage routing
     // =========================================================================
-    // Android's stage API is peer-additive/removal (stagePeers/unstagePeers), unlike RN's
-    // handleRoomSettingsStage() which resubmits the entire peer list every time. Neither
+    // Membership uses the per-peer server requests stagePeers/unstagePeers. The demo does not
+    // call handleRoomSettingsStage(): that broadcast carries the WHOLE stage state (stageStatus,
+    // stagePeers, ...) and receivers treat a missing field as off/empty, and this demo does not
+    // track that state. (Q-13, 27 Nov 2026: the old "Save Stage Capacity" button sent
+    // roomSetting:stageConfig, which no client or server ever read, so it was removed.) Neither
     // call has a confirmation event (StagePeersResponse only carries a raw JSONObject with
     // no documented shape), so "who's on stage" is tracked optimistically client-side —
     // same pattern as isMicMuted etc. elsewhere in this ViewModel.
@@ -728,12 +731,6 @@ class RoomViewModel(application: Application) : AndroidViewModel(application) {
     fun removeStagePeers(peerIds: List<String>) {
         room?.unstagePeers(peerIds)
         appendLog("⇢ unstaged: $peerIds")
-    }
-
-    /** Moderator configures stage capacity/mode (not membership — see stagePeers above). */
-    fun updateStageSettings(maxOnStage: Int?, stageMode: String?) {
-        room?.handleRoomSettingsStage(maxOnStage, stageMode)
-        appendLog("⇢ updated stage settings")
     }
 
     /** Self-service: move myself onto the stage. */

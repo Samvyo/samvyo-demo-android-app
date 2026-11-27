@@ -449,6 +449,14 @@ dispatch convention (the server doesn't act on `maxOnStage`/`stageMode` itself, 
 only relays the broadcast), so this was a safe, isolated rename with no other
 references anywhere in the SDK.
 
+**Superseded 27 Nov 2026 (Q-13, Saurav #209 / board #243):** the Android SDK now uses the one
+cross-SDK label. `handleRoomSettingsStage(stageStatus, stagePeers, backStageStatus,
+backStagePeers, maxOnStage, stageMode)` (all optional, named) sends `roomSetting:stageSettings`
+like JS/RN/Flutter; `roomSetting:stageConfig` is gone. Because receivers treat a missing
+`stageStatus`/`stagePeers` as off/empty, this demo no longer calls it: the "Save Stage Capacity"
+button (and `updateStageSettings()`) was removed. It only ever sent `stageConfig`, which no
+client or server read, so nothing visible changes for other participants.
+
 ## Confirmed correct, not a gap — P2P in the room-type picker
 
 RN's own room-type picker (`App.js` line 1787) offers

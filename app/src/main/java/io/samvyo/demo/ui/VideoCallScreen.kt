@@ -111,7 +111,6 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
     var chatInput by remember { mutableStateOf("") }
     var stagePeersInput     by remember { mutableStateOf("") }
     var backStagePeersInput by remember { mutableStateOf("") }
-    var maxOnStageInput by remember { mutableStateOf("") }
     var liveStreamUrl by remember { mutableStateOf("") }
     var liveStreamKey by remember { mutableStateOf("") }
 
@@ -353,16 +352,6 @@ fun CallSections(vm: RoomViewModel, peerType: String, roomExists: Boolean) {
                 if (stage.isNotEmpty()) vm.setStagePeers(stage)
                 if (backStage.isNotEmpty()) vm.removeStagePeers(backStage)
             }) { Text("Apply Stage Settings") }
-            OutlinedTextField(
-                value         = maxOnStageInput,
-                onValueChange = { maxOnStageInput = it },
-                placeholder   = { Text("Max On Stage") },
-                singleLine    = true,
-                modifier      = Modifier.fillMaxWidth(),
-            )
-            OutlinedButton(onClick = { vm.updateStageSettings(maxOnStageInput.toIntOrNull(), null) }) {
-                Text("Save Stage Capacity")
-            }
         }
 
         // ── Room settings (moderator only) ────────────────────────────────────
